@@ -147,6 +147,7 @@ class LidarPersonTrackerNode(Node):
         # Target tracking
         self.declare_parameter("max_lost_frames", 100)
         self.declare_parameter("target_min_distance", 0.5)
+        self.declare_parameter("redetection_radius", 1.5)  # 재감지 반경 (m)
 
         # Visualization
         self.declare_parameter("viz_enable", True)
@@ -171,6 +172,11 @@ class LidarPersonTrackerNode(Node):
         self.target_track_id: Optional[int] = None
         self.target_lost_frames: int = 0
         self.space_pressed: bool = False
+
+        # Target redetection state
+        self.last_target_position: Optional[np.ndarray] = None  # [x, y]
+        self.last_target_velocity: Optional[np.ndarray] = None  # [vx, vy]
+        self.target_lost_timestamp: Optional[float] = None      # 타겟을 놓친 시각
 
         # OpenCV window
         self.viz_enable = bool(self.get_parameter("viz_enable").value)
@@ -412,33 +418,114 @@ class LidarPersonTrackerNode(Node):
         
         return best_track.track_id if best_track else None
 
-    def update_target_tracking(self) -> None:
+    def update_target_tracking(self, now_sec: float) -> None:
         """
-        추적 대상이 현재 프레임에 있는지 확인
+        추적 대상이 현재 프레임에 있는지 확인하고, 사라질 경우 마지막 위치 저장
         """
         if self.target_track_id is None:
             return
-        
+
         target_exists = False
         hit_min = int(self.get_parameter("hit_min").value)
-        
+
         for tr in self.tracks:
             if tr.track_id == self.target_track_id:
                 target_exists = True
                 if tr.hits >= hit_min:
                     self.target_lost_frames = 0
+                    # 타겟이 계속 추적 중이면 위치/속도 업데이트
+                    self.last_target_position = tr.pos.copy()
+                    self.last_target_velocity = tr.vel.copy()
                 else:
+                    # 처음 놓친 순간 기록
+                    if self.target_lost_frames == 0:
+                        self.last_target_position = tr.pos.copy()
+                        self.last_target_velocity = tr.vel.copy()
+                        self.target_lost_timestamp = now_sec
+                        self.get_logger().info(
+                            f"Target starting to lose: ID {self.target_track_id} at ({tr.pos[0]:.2f}, {tr.pos[1]:.2f})"
+                        )
                     self.target_lost_frames += 1
                 break
-        
+
         if not target_exists:
+            # 트랙이 완전히 사라진 경우
+            if self.target_lost_frames == 0:
+                # 처음 사라진 순간 - 마지막으로 알려진 위치가 있어야 함
+                if self.last_target_position is not None:
+                    self.target_lost_timestamp = now_sec
+                    self.get_logger().warn(
+                        f"Target track disappeared: ID {self.target_track_id} at last known position ({self.last_target_position[0]:.2f}, {self.last_target_position[1]:.2f})"
+                    )
             self.target_lost_frames += 1
-        
+
         max_lost = int(self.get_parameter("max_lost_frames").value)
         if self.target_lost_frames >= max_lost:
-            self.get_logger().warn(f"Target lost: ID {self.target_track_id} after {self.target_lost_frames} frames")
+            self.get_logger().warn(f"Target completely lost: ID {self.target_track_id} after {self.target_lost_frames} frames")
             self.target_track_id = None
             self.target_lost_frames = 0
+            self.last_target_position = None
+            self.last_target_velocity = None
+            self.target_lost_timestamp = None
+
+    def attempt_target_redetection(self, now_sec: float) -> bool:
+        """
+        타겟이 사라진 상태에서 근처 객체를 재감지 시도
+        Returns: 재감지 성공 여부
+        """
+        if self.target_track_id is not None and self.target_lost_frames == 0:
+            # 타겟이 정상 추적 중이면 재감지 불필요
+            return False
+
+        if self.last_target_position is None or self.target_lost_timestamp is None:
+            # 마지막 위치 정보가 없으면 재감지 불가
+            return False
+
+        # 예측 위치 계산 (속도 정보 활용)
+        elapsed_time = now_sec - self.target_lost_timestamp
+        predicted_pos = self.last_target_position.copy()
+
+        if self.last_target_velocity is not None:
+            # 속도를 고려한 예측 위치
+            predicted_pos = predicted_pos + self.last_target_velocity * elapsed_time
+
+        # 재감지 반경 내 confirmed tracks 검색
+        redetection_radius = float(self.get_parameter("redetection_radius").value)
+        hit_min = int(self.get_parameter("hit_min").value)
+        confirmed = self.get_confirmed_tracks()
+
+        best_track = None
+        min_distance = float('inf')
+
+        for tr in confirmed:
+            # 현재 타겟은 제외 (혹시 아직 리스트에 있을 경우)
+            if tr.track_id == self.target_track_id:
+                continue
+
+            # 예측 위치로부터의 거리 계산
+            dist = np.linalg.norm(tr.pos - predicted_pos)
+
+            if dist <= redetection_radius and dist < min_distance:
+                min_distance = dist
+                best_track = tr
+
+        if best_track is not None:
+            # 재감지 성공!
+            old_id = self.target_track_id
+            self.target_track_id = best_track.track_id
+            self.target_lost_frames = 0
+            self.last_target_position = best_track.pos.copy()
+            self.last_target_velocity = best_track.vel.copy()
+            self.target_lost_timestamp = None
+
+            self.get_logger().info(
+                f"Target RE-DETECTED! Old ID: {old_id} -> New ID: {best_track.track_id} | "
+                f"Distance from predicted position: {min_distance:.2f}m | "
+                f"New position: ({best_track.pos[0]:.2f}, {best_track.pos[1]:.2f})"
+            )
+            return True
+
+        return False
 
     def reset_target_tracking(self) -> None:
         """
@@ -446,9 +533,12 @@ class LidarPersonTrackerNode(Node):
         """
         if self.target_track_id is not None:
             self.get_logger().info(f"Tracking reset: ID {self.target_track_id}")
-        
+
         self.target_track_id = None
         self.target_lost_frames = 0
+        self.last_target_position = None
+        self.last_target_velocity = None
+        self.target_lost_timestamp = None
 
     # -------------------------
     # Step 5: Visualization
@@ -482,7 +572,7 @@ class LidarPersonTrackerNode(Node):
         cv2.putText(img, help_text, (10, status_y + 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
-    def draw_top_view(self, points_xy: np.ndarray, clusters: List[Cluster], detections: np.ndarray) -> None:
+    def draw_top_view(self, points_xy: np.ndarray, clusters: List[Cluster], detections: np.ndarray, now_sec: float) -> None:
         if not self.viz_enable:
             return
 
@@ -508,6 +598,32 @@ class LidarPersonTrackerNode(Node):
             cv2.line(img, origin, p1, (50, 50, 50), 1)
             cv2.line(img, origin, p2, (50, 50, 50), 1)
             cv2.circle(img, origin, int(rmax * scale), (30, 30, 30), 1)
+
+        # 재감지 범위 및 예측 위치 시각화 (타겟이 lost 상태일 때)
+        if self.target_lost_frames > 0 and self.last_target_position is not None and self.target_lost_timestamp is not None:
+            elapsed_time = now_sec - self.target_lost_timestamp
+            predicted_pos = self.last_target_position.copy()
+
+            if self.last_target_velocity is not None:
+                predicted_pos = predicted_pos + self.last_target_velocity * elapsed_time
+
+            redetection_radius = float(self.get_parameter("redetection_radius").value)
+
+            # 예측 위치 표시
+            pred_u, pred_v = to_px(predicted_pos)
+            cv2.circle(img, (pred_u, pred_v), 8, (255, 0, 255), 2)  # 보라색 원
+            cv2.putText(img, "PRED", (pred_u + 10, pred_v - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+
+            # 재감지 범위 표시
+            radius_px = int(redetection_radius * scale)
+            cv2.circle(img, (pred_u, pred_v), radius_px, (255, 0, 255), 1)  # 보라색 원
+
+            # 마지막 알려진 위치 표시
+            last_u, last_v = to_px(self.last_target_position)
+            cv2.circle(img, (last_u, last_v), 6, (128, 0, 128), 2)  # 어두운 보라색
+            cv2.putText(img, "LAST", (last_u + 10, last_v - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 0, 128), 1)
 
         for p in points_xy:
             u, v = to_px(p)
@@ -597,7 +713,7 @@ class LidarPersonTrackerNode(Node):
         points_xy, ranges_filtered = self.preprocess_scan(msg)
 
         if points_xy.shape[0] == 0:
-            self.draw_top_view(points_xy, [], np.zeros((0, 2), dtype=np.float32))
+            self.draw_top_view(points_xy, [], np.zeros((0, 2), dtype=np.float32), now_sec)
             return
 
         # Step 2: clustering
@@ -610,7 +726,11 @@ class LidarPersonTrackerNode(Node):
         self.step_tracker(detections, dt, now_sec)
 
         # Step 4.5: target tracking update
-        self.update_target_tracking()
+        self.update_target_tracking(now_sec)
+
+        # Step 4.6: 타겟 재감지 시도 (타겟이 lost 상태일 때)
+        if self.target_lost_frames > 0:
+            self.attempt_target_redetection(now_sec)
 
         # Space 키 입력 처리
         if self.space_pressed:
@@ -622,6 +742,8 @@ class LidarPersonTrackerNode(Node):
                 # 선택된 트랙 정보 로깅
                 for tr in self.tracks:
                     if tr.track_id == selected_id:
+                        self.last_target_position = tr.pos.copy()
+                        self.last_target_velocity = tr.vel.copy()
                         self.get_logger().info(
                             f"Target locked: ID {selected_id} at ({tr.pos[0]:.2f}, {tr.pos[1]:.2f})"
                         )
@@ -630,7 +752,7 @@ class LidarPersonTrackerNode(Node):
                 self.get_logger().warn("No valid track to lock!")
 
         # Step 5: visualization
-        self.draw_top_view(points_xy, candidate_clusters, detections)
+        self.draw_top_view(points_xy, candidate_clusters, detections, now_sec)
 
 
 def main():
