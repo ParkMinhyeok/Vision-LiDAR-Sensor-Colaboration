@@ -303,13 +303,13 @@ python3 scan_exist_test.py \
 
 ## 최종 상태
 
-✅ ROS2 Humble 설치 완료
-✅ ROS2 Workspace 생성 및 설정
-✅ rosdep 및 colcon 설치
-✅ Slamtec C1 LiDAR 드라이버 빌드
-✅ USB 포트 권한 설정
-✅ LiDAR 실행 및 RViz2 시각화
-✅ 실시간 환경 인식 데이터 수집 가능
+✅ ROS2 Humble 설치 완료  
+✅ ROS2 Workspace 생성 및 설정  
+✅ rosdep 및 colcon 설치  
+✅ Slamtec C1 LiDAR 드라이버 빌드  
+✅ USB 포트 권한 설정  
+✅ LiDAR 실행 및 RViz2 시각화  
+✅ 실시간 환경 인식 데이터 수집 가능  
 
 🚀 **Jetson Orin Nano 환경에서 LiDAR 기반 로봇 개발 준비 완료**
 
