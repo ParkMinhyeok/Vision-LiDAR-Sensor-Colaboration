@@ -1,6 +1,6 @@
-# YOLO11n TensorRT (FP16) on Jetson Orin Nano
+# YOLO11 TensorRT (FP16) on Jetson Orin Nano
 
-Jetson Orin Nano (JetPack 6.x / CUDA 12.6) 환경에서 YOLO11n 모델을 TensorRT FP16 엔진으로 변환하고 실행하는 가이드입니다.
+Jetson Orin Nano (JetPack 6.x / CUDA 12.6) 환경에서 YOLO11 모델을 TensorRT FP16 엔진으로 변환하고 실행하는 가이드입니다.
 
 ## 환경 사양
 
