@@ -1,6 +1,4 @@
-# Vision-LiDAR-Sensor-Colaboration
-
-# Vision-LiDAR Fusion 알고리즘 문서
+# Vision-LiDAR Fusion 알고리즘
 
 > Vision(카메라)과 LiDAR 센서를 결합하여 객체를 추적하는 시스템의 알고리즘 설명
 
